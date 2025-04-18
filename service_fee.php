@@ -1,4 +1,5 @@
 <?php
+date_default_timezone_set('Asia/Bangkok'); // or your local timezone
 require_once "config.php";
 
 // Check if user is logged in
@@ -73,13 +74,16 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["make_payment"])) {
 }
 
 // Get active parking record
-$activeParkingSql = "SELECT pr.record_id, pr.vehicle_number, ps.spot_id, ps.spot_number, pz.zone_name, pz.zone_id, 
-                     pr.entry_time, TIMEDIFF(NOW(), pr.entry_time) as duration 
+$activeParkingSql = "SELECT pr.record_id, pr.vehicle_number, ps.spot_number, pz.zone_name, 
+                     pr.entry_time, pr.confirmation_status, ps.zone_id
                      FROM parking_records pr
                      JOIN parking_spots ps ON pr.spot_id = ps.spot_id
                      JOIN parking_zones pz ON ps.zone_id = pz.zone_id
-                     WHERE pr.user_id = ? AND pr.exit_time IS NULL ";
-                     
+                     WHERE pr.user_id = ? 
+                     AND pr.exit_time IS NULL 
+                     AND pr.confirmation_status NOT IN ('expired', 'cancelled', 'pending')
+                     AND pr.payment_status != 'expired'";
+
 if ($recordId) {
     $activeParkingSql .= "AND pr.record_id = ? ";
 }
@@ -95,9 +99,8 @@ if ($recordId) {
 }
 
 mysqli_stmt_execute($stmt);
-$activeResult = mysqli_stmt_get_result($stmt);
-$hasActiveParking = mysqli_num_rows($activeResult) > 0;
-$activeParking = $hasActiveParking ? mysqli_fetch_assoc($activeResult) : null;
+$activeParkingResult = mysqli_stmt_get_result($stmt);
+$hasActiveParking = mysqli_num_rows($activeParkingResult) > 0;
 
 // Function to calculate parking fee with increasing hourly rate
 function calculateParkingFee($duration, $zoneId) {
@@ -129,20 +132,40 @@ function calculateParkingFee($duration, $zoneId) {
     return $fee;
 }
 
-// Calculate parking fee if there's an active parking
-$fee = 0;
-if ($hasActiveParking) {
-    $fee = calculateParkingFee($activeParking['duration'], $activeParking['zone_id']);
+// Update the fee calculation to use entry_time only for confirmed reservations
+$feeSql = "SELECT pr.*, ps.zone_id,
+           CASE 
+               WHEN pr.confirmation_status = 'confirmed' 
+               THEN TIMEDIFF(NOW(), pr.entry_time)
+               ELSE NULL 
+           END as duration
+           FROM parking_records pr
+           JOIN parking_spots ps ON pr.spot_id = ps.spot_id
+           WHERE pr.record_id = ? AND pr.user_id = ?";
+
+$stmt = mysqli_prepare($conn, $feeSql);
+mysqli_stmt_bind_param($stmt, "ii", $recordId, $userId);
+mysqli_stmt_execute($stmt);
+$result = mysqli_stmt_get_result($stmt);
+$parkingRecord = mysqli_fetch_assoc($result);
+
+// Calculate fee only if parking record exists and is confirmed
+if ($parkingRecord && $parkingRecord['confirmation_status'] === 'confirmed' && $parkingRecord['duration']) {
+    $fee = calculateParkingFee($parkingRecord['duration'], $parkingRecord['zone_id']);
+} else {
+    $fee = 0;
 }
 
 // Get parking history
 $historySql = "SELECT pr.record_id, pr.vehicle_number, ps.spot_number, pz.zone_name, 
               pr.entry_time, pr.exit_time, pr.fee, pr.payment_status,
+              pr.confirmation_status,
               TIMEDIFF(IFNULL(pr.exit_time, NOW()), pr.entry_time) as duration 
               FROM parking_records pr
               JOIN parking_spots ps ON pr.spot_id = ps.spot_id
               JOIN parking_zones pz ON ps.zone_id = pz.zone_id
-              WHERE pr.user_id = ? AND pr.exit_time IS NOT NULL
+              WHERE pr.user_id = ? 
+              AND (pr.exit_time IS NOT NULL OR pr.confirmation_status IN ('expired', 'cancelled'))
               ORDER BY pr.entry_time DESC
               LIMIT 10";
 $stmt = mysqli_prepare($conn, $historySql);
@@ -216,6 +239,31 @@ $historyResult = mysqli_stmt_get_result($stmt);
             padding: 10px;
             text-align: center;
         }
+        .payment-form .form-check {
+            margin-bottom: 10px;
+            padding: 10px;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            transition: all 0.3s;
+        }
+
+        .payment-form .form-check:hover {
+            background-color: #f8f9fa;
+        }
+
+        .payment-form .form-check-input:checked + .form-check-label {
+            color: #4e73df;
+        }
+
+        .payment-form .fas {
+            margin-right: 10px;
+            width: 20px;
+        }
+
+        .btn-primary {
+            width: 100%;
+            margin-top: 10px;
+        }
     </style>
 </head>
 <body>
@@ -280,6 +328,36 @@ $historyResult = mysqli_stmt_get_result($stmt);
                 </div>
                 <?php endif; ?>
                 
+                <?php
+                // Check for recently expired reservations
+                $checkExpiredSql = "SELECT pr.*, ps.spot_number, pz.zone_name
+                                    FROM parking_records pr
+                                    JOIN parking_spots ps ON pr.spot_id = ps.spot_id
+                                    JOIN parking_zones pz ON ps.zone_id = pz.zone_id
+                                    WHERE pr.user_id = ?
+                                    AND pr.confirmation_status = 'expired'
+                                    AND pr.exit_time >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+                                    ORDER BY pr.exit_time DESC
+                                    LIMIT 1";
+
+                $stmt = mysqli_prepare($conn, $checkExpiredSql);
+                mysqli_stmt_bind_param($stmt, "i", $userId);
+                mysqli_stmt_execute($stmt);
+                $expiredResult = mysqli_stmt_get_result($stmt);
+
+                if ($expiredResult && mysqli_num_rows($expiredResult) > 0) {
+                    $expiredRecord = mysqli_fetch_assoc($expiredResult);
+                ?>
+                    <div class="alert alert-warning alert-dismissible fade show" role="alert">
+                        <strong>Reservation Expired!</strong> Your reservation for spot 
+                        <?php echo htmlspecialchars($expiredRecord['zone_name'] . ' - ' . $expiredRecord['spot_number']); ?> 
+                        has expired due to no confirmation from admin within the time limit.
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                <?php
+                }
+                ?>
+
                 <!-- Our Parking Rates -->
                 <div class="card mb-4">
                     <div class="card-header">
@@ -333,126 +411,148 @@ $historyResult = mysqli_stmt_get_result($stmt);
                     </div>
                 </div>
                 
-                <?php if ($hasActiveParking): ?>
                 <!-- Current Parking Fee -->
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h5 class="mb-0"><i class="fas fa-car me-2"></i>Current Parking Session</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="row">
-                            <div class="col-md-4">
-                                <div class="fee-card">
-                                    <div class="fee-label">Current Fee</div>
-                                    <div class="fee-amount"><?php echo number_format($fee, 2); ?> ฿</div>
-                                    <div class="fee-info">
-                                        <div><strong>Duration:</strong> <?php echo $activeParking['duration']; ?></div>
-                                        <div><strong>Vehicle:</strong> <?php echo htmlspecialchars($activeParking['vehicle_number']); ?></div>
-                                        <div><strong>Spot:</strong> <?php echo htmlspecialchars($activeParking['zone_name'] . ' - ' . $activeParking['spot_number']); ?></div>
-                                    </div>
+                <?php if ($activeParkingResult && mysqli_num_rows($activeParkingResult) > 0): ?>
+                    <?php 
+                    $parking = mysqli_fetch_assoc($activeParkingResult);
+                    // Calculate current fee based on entry_time (set when admin confirms)
+                    $currentDuration = strtotime('now') - strtotime($parking['entry_time']);
+                    // Format duration as HH:MM:SS
+                    $formattedDuration = gmdate('H:i:s', $currentDuration);
+
+                    // Calculate fee based on zone rates
+                    $zoneId = $parking['zone_id'];
+                    $baseRates = [
+                        1 => 30, // Zone A: 30 baht base rate
+                        2 => 25, // Zone B: 25 baht base rate
+                        3 => 20, // Zone C: 20 baht base rate
+                        4 => 50  // Zone D (VIP): 50 baht base rate
+                    ];
+
+                    // Get base rate for the zone
+                    $baseRate = isset($baseRates[$zoneId]) ? $baseRates[$zoneId] : 30;
+
+                    // Calculate hours (round up to nearest hour)
+                    $hours = ceil($currentDuration / 3600);
+                    $currentFee = $baseRate; // Start with base rate
+
+                    // Add additional hourly charges
+                    if ($hours > 1) {
+                        for ($i = 2; $i <= $hours; $i++) {
+                            $currentFee += $baseRate + (($i - 1) * 10);
+                        }
+                    }
+                    ?>
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <h5 class="mb-0">Current Parking Session</h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <p class="mb-2">
+                                        <strong>Vehicle:</strong> <?php echo htmlspecialchars($parking['vehicle_number']); ?><br>
+                                        <strong>Spot:</strong> <?php echo htmlspecialchars($parking['zone_name'] . ' - ' . $parking['spot_number']); ?><br>
+                                        <strong>Entry Time:</strong> <?php echo htmlspecialchars($parking['entry_time']); ?><br>
+                                        <strong>Duration:</strong> <?php echo $formattedDuration; ?><br>
+                                        <strong>Current Fee:</strong> ฿<?php echo number_format($currentFee, 2); ?>
+                                    </p>
+                                </div>
+                                <div class="col-md-6">
+                                    <form method="post" class="payment-form">
+                                        <input type="hidden" name="record_id" value="<?php echo $parking['record_id']; ?>">
+                                        <input type="hidden" name="amount" value="<?php echo $currentFee; ?>">
+                                        
+                                        <div class="mb-3">
+                                            <label class="form-label"><strong>Payment Method:</strong></label>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="radio" name="payment_method" value="credit_card" id="creditCard" checked>
+                                                <label class="form-check-label" for="creditCard">
+                                                    <i class="fas fa-credit-card"></i> Credit Card
+                                                </label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="radio" name="payment_method" value="promptpay" id="promptPay">
+                                                <label class="form-check-label" for="promptPay">
+                                                    <i class="fas fa-qrcode"></i> PromptPay
+                                                </label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="radio" name="payment_method" value="cash" id="cash">
+                                                <label class="form-check-label" for="cash">
+                                                    <i class="fas fa-money-bill"></i> Cash
+                                                </label>
+                                            </div>
+                                        </div>
+                                        
+                                        <button type="submit" name="make_payment" class="btn btn-primary">
+                                            <i class="fas fa-cash-register"></i> Pay Now
+                                        </button>
+                                    </form>
                                 </div>
                             </div>
-                            <div class="col-md-8">
-                                <h5>Payment Details</h5>
-                                <form method="post" action="">
-                                    <input type="hidden" name="record_id" value="<?php echo $activeParking['record_id']; ?>">
-                                    <input type="hidden" name="amount" value="<?php echo $fee; ?>">
-                                    
-                                    <div class="payment-methods mb-3">
-                                        <label class="form-label">Payment Method</label>
-                                        <div class="form-check">
-                                            <input class="form-check-input" type="radio" name="payment_method" id="method_cash" value="cash" checked>
-                                            <label class="form-check-label" for="method_cash">
-                                                <i class="fas fa-money-bill-wave me-2"></i>Cash
-                                            </label>
-                                        </div>
-                                        <div class="form-check">
-                                            <input class="form-check-input" type="radio" name="payment_method" id="method_credit" value="credit_card">
-                                            <label class="form-check-label" for="method_credit">
-                                                <i class="fas fa-credit-card me-2"></i>Credit Card
-                                            </label>
-                                        </div>
-                                        <div class="form-check">
-                                            <input class="form-check-input" type="radio" name="payment_method" id="method_qr" value="qr_code">
-                                            <label class="form-check-label" for="method_qr">
-                                                <i class="fas fa-qrcode me-2"></i>QR Payment
-                                            </label>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="alert alert-info">
-                                        <i class="fas fa-info-circle me-2"></i>
-                                        When you complete payment, your vehicle will be marked as exited and the parking spot will be available for others.
-                                    </div>
-                                    
-                                    <button type="submit" name="make_payment" class="btn btn-primary">
-                                        <i class="fas fa-check me-2"></i>Complete Payment and Exit
-                                    </button>
-                                </form>
-                            </div>
                         </div>
                     </div>
-                </div>
                 <?php else: ?>
-                <div class="alert alert-info mb-4">
-                    <i class="fas fa-info-circle me-2"></i>
-                    You don't have any active parking sessions at the moment.
-                    <a href="available_parking.php" class="alert-link">Reserve a parking spot</a>.
-                </div>
+                    <div class="alert alert-info">
+                        You don't have any active parking sessions at the moment. 
+                        <a href="available_parking.php" class="alert-link">Reserve a parking spot</a>.
+                    </div>
                 <?php endif; ?>
-                
-                <!-- Parking History -->
-                <div class="card">
-                    <div class="card-header">
-                        <h5 class="mb-0"><i class="fas fa-history me-2"></i>Parking History</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-striped">
-                                <thead>
-                                    <tr>
-                                        <th>Vehicle Number</th>
-                                        <th>Spot</th>
-                                        <th>Entry Time</th>
-                                        <th>Exit Time</th>
-                                        <th>Duration</th>
-                                        <th>Fee</th>
-                                        <th>Status</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (mysqli_num_rows($historyResult) > 0): ?>
-                                        <?php while ($history = mysqli_fetch_assoc($historyResult)): ?>
-                                        <tr>
-                                            <td><?php echo htmlspecialchars($history['vehicle_number']); ?></td>
-                                            <td><?php echo htmlspecialchars($history['zone_name'] . ' - ' . $history['spot_number']); ?></td>
-                                            <td><?php echo htmlspecialchars($history['entry_time']); ?></td>
-                                            <td><?php echo htmlspecialchars($history['exit_time']); ?></td>
-                                            <td><?php echo htmlspecialchars($history['duration']); ?></td>
-                                            <td><?php echo number_format($history['fee'], 2); ?> ฿</td>
-                                            <td>
-                                                <?php if ($history['payment_status'] == 'paid'): ?>
-                                                    <span class="badge bg-success">Paid</span>
-                                                <?php else: ?>
-                                                    <span class="badge bg-warning">Pending</span>
-                                                <?php endif; ?>
-                                            </td>
-                                        </tr>
-                                        <?php endwhile; ?>
+
+                <!-- Parking History Section -->
+                <div class="table-responsive mt-4">
+                    <h5>Parking History</h5>
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Vehicle</th>
+                                <th>Spot</th>
+                                <th>Entry Time</th>
+                                <th>Exit Time</th>
+                                <th>Duration</th>
+                                <th>Fee</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php while ($record = mysqli_fetch_assoc($historyResult)): ?>
+                            <tr>
+                                <td><?php echo htmlspecialchars($record['vehicle_number']); ?></td>
+                                <td><?php echo htmlspecialchars($record['zone_name'] . ' - ' . $record['spot_number']); ?></td>
+                                <td><?php echo htmlspecialchars($record['entry_time']); ?></td>
+                                <td><?php echo htmlspecialchars($record['exit_time']); ?></td>
+                                <td><?php echo $record['duration']; ?></td>
+                                <td>฿<?php echo $record['fee'] ? htmlspecialchars($record['fee']) : '0'; ?></td>
+                                <td>
+                                    <?php if ($record['confirmation_status'] == 'expired'): ?>
+                                        <span class="badge bg-warning">Expired</span>
                                     <?php else: ?>
-                                        <tr>
-                                            <td colspan="7" class="text-center">No parking history found.</td>
-                                        </tr>
+                                        <span class="badge bg-<?php echo $record['payment_status'] == 'paid' ? 'success' : 'warning'; ?>">
+                                            <?php echo ucfirst(htmlspecialchars($record['payment_status'])); ?>
+                                        </span>
                                     <?php endif; ?>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
+                                </td>
+                            </tr>
+                            <?php endwhile; ?>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+    // Check for expired reservations every 30 seconds
+    function checkExpiredReservations() {
+        location.reload();
+    }
+
+    // Only start checking if there's an active parking session
+    <?php if ($hasActiveParking): ?>
+        setInterval(checkExpiredReservations, 30000);
+    <?php endif; ?>
+    </script>
 </body>
 </html>

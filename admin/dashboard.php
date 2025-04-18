@@ -48,14 +48,15 @@ $monthlyIncomeResult = mysqli_query($conn, $monthlyIncomeSql);
 $monthlyIncome = mysqli_fetch_assoc($monthlyIncomeResult)['income'] ?: 0;
 
 // Get recent parking activities
-$recentActivitiesSql = "SELECT pr.*, u.first_name, u.last_name, ps.spot_number, pz.zone_name 
-                      FROM parking_records pr
-                      JOIN user u ON pr.user_id = u.user_id
-                      JOIN parking_spots ps ON pr.spot_id = ps.spot_id
-                      JOIN parking_zones pz ON ps.zone_id = pz.zone_id
-                      ORDER BY pr.entry_time DESC
-                      LIMIT 10";
-$recentActivitiesResult = mysqli_query($conn, $recentActivitiesSql);
+$recentRecordsSql = "SELECT pr.*, u.first_name, u.last_name, ps.spot_number, pz.zone_name 
+                     FROM parking_records pr
+                     JOIN user u ON pr.user_id = u.user_id
+                     JOIN parking_spots ps ON pr.spot_id = ps.spot_id
+                     JOIN parking_zones pz ON ps.zone_id = pz.zone_id
+                     WHERE pr.exit_time IS NOT NULL 
+                     OR pr.confirmation_status IN ('expired', 'cancelled')
+                     ORDER BY pr.entry_time DESC LIMIT 5";
+$recentActivitiesResult = mysqli_query($conn, $recentRecordsSql);
 
 // Get most used zones
 $mostUsedZonesSql = "SELECT pz.zone_name, COUNT(*) as usage_count 
@@ -369,32 +370,34 @@ $mostUsedZonesResult = mysqli_query($conn, $mostUsedZonesSql);
                                         <tbody>
                                             <?php
                                             if (mysqli_num_rows($recentActivitiesResult) > 0) {
-                                                while ($activity = mysqli_fetch_assoc($recentActivitiesResult)) {
-                                                    $entryTime = strtotime($activity['entry_time']);
-                                                    $exitTime = $activity['exit_time'] ? strtotime($activity['exit_time']) : time();
+                                                while ($record = mysqli_fetch_assoc($recentActivitiesResult)) {
+                                                    $entryTime = strtotime($record['entry_time']);
+                                                    $exitTime = $record['exit_time'] ? strtotime($record['exit_time']) : time();
                                                     $duration = ceil(($exitTime - $entryTime) / 3600);
                                                     
                                                     echo '<tr>';
-                                                    echo '<td>' . htmlspecialchars($activity['first_name'] . ' ' . $activity['last_name']) . '</td>';
-                                                    echo '<td>' . htmlspecialchars($activity['vehicle_number']) . '</td>';
-                                                    echo '<td>' . htmlspecialchars($activity['zone_name']) . '</td>';
-                                                    echo '<td>' . htmlspecialchars($activity['spot_number']) . '</td>';
-                                                    echo '<td>' . htmlspecialchars($activity['entry_time']) . '</td>';
-                                                    echo '<td>' . ($activity['exit_time'] ? htmlspecialchars($activity['exit_time']) : 'Still Parked') . '</td>';
+                                                    echo '<td>' . htmlspecialchars($record['first_name'] . ' ' . $record['last_name']) . '</td>';
+                                                    echo '<td>' . htmlspecialchars($record['vehicle_number']) . '</td>';
+                                                    echo '<td>' . htmlspecialchars($record['zone_name']) . '</td>';
+                                                    echo '<td>' . htmlspecialchars($record['spot_number']) . '</td>';
+                                                    echo '<td>' . htmlspecialchars($record['entry_time']) . '</td>';
+                                                    echo '<td>' . ($record['exit_time'] ? htmlspecialchars($record['exit_time']) : 'Still Parked') . '</td>';
                                                     echo '<td>' . $duration . ' hr' . ($duration > 1 ? 's' : '') . '</td>';
-                                                    echo '<td>' . ($activity['fee'] ? '฿' . htmlspecialchars($activity['fee']) : 'N/A') . '</td>';
+                                                    echo '<td>' . ($record['fee'] ? '฿' . htmlspecialchars($record['fee']) : 'N/A') . '</td>';
                                                     echo '<td>';
-                                                    
-                                                    if ($activity['exit_time'] === null) {
-                                                        echo '<span class="badge bg-info">Active</span>';
-                                                    } else if ($activity['payment_status'] === 'Paid') {
-                                                        echo '<span class="badge bg-success">Paid</span>';
-                                                    } else if ($activity['payment_status'] === 'Pending') {
-                                                        echo '<span class="badge bg-warning">Pending</span>';
-                                                    } else {
-                                                        echo '<span class="badge bg-secondary">' . htmlspecialchars($activity['payment_status']) . '</span>';
+                                                    switch($record['confirmation_status']) {
+                                                        case 'expired':
+                                                            echo '<span class="badge bg-secondary">Expired</span>';
+                                                            break;
+                                                        case 'cancelled':
+                                                            echo '<span class="badge bg-danger">Cancelled</span>';
+                                                            break;
+                                                        case 'confirmed':
+                                                            echo '<span class="badge bg-success">Completed</span>';
+                                                            break;
+                                                        default:
+                                                            echo '<span class="badge bg-warning">Pending</span>';
                                                     }
-                                                    
                                                     echo '</td>';
                                                     echo '</tr>';
                                                 }

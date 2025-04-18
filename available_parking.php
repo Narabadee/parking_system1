@@ -1,6 +1,9 @@
 <?php
 require_once "config.php";
 
+date_default_timezone_set('Asia/Bangkok');
+mysqli_query($conn, "SET time_zone = '+07:00'"); // Use your local time zone, e.g., Asia/Bangkok
+
 // Check if user is logged in
 if (!isLoggedIn()) {
     header("Location: login.php");
@@ -37,8 +40,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["reserve_spot"])) {
             mysqli_stmt_execute($stmt);
             
             // Create parking record
-            $createRecordSql = "INSERT INTO parking_records (user_id, spot_id, vehicle_number, entry_time) 
-                               VALUES (?, ?, ?, NOW())";
+            $createRecordSql = "INSERT INTO parking_records (user_id, spot_id, vehicle_number, entry_time, reservation_time, confirmation_status) 
+                               VALUES (?, ?, ?, NOW(), NOW(), 'pending')";
             $stmt = mysqli_prepare($conn, $createRecordSql);
             mysqli_stmt_bind_param($stmt, "iis", $userId, $spotId, $vehicleNumber);
             mysqli_stmt_execute($stmt);
@@ -63,17 +66,71 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["reserve_spot"])) {
 }
 
 // Check if user has an active parking spot
-$activeParkingSql = "SELECT pr.record_id, pr.vehicle_number, ps.spot_number, pz.zone_name, pr.entry_time 
-                    FROM parking_records pr
-                    JOIN parking_spots ps ON pr.spot_id = ps.spot_id
-                    JOIN parking_zones pz ON ps.zone_id = pz.zone_id
-                    WHERE pr.user_id = ? AND pr.exit_time IS NULL";
+$activeParkingSql = "SELECT pr.*, ps.spot_number, pz.zone_name 
+                     FROM parking_records pr
+                     JOIN parking_spots ps ON pr.spot_id = ps.spot_id
+                     JOIN parking_zones pz ON ps.zone_id = pz.zone_id
+                     WHERE pr.user_id = ? 
+                     AND pr.exit_time IS NULL 
+                     AND pr.confirmation_status NOT IN ('expired', 'cancelled', 'pending')
+                     AND pr.payment_status != 'expired'
+                     LIMIT 1";
 $stmt = mysqli_prepare($conn, $activeParkingSql);
 mysqli_stmt_bind_param($stmt, "i", $userId);
 mysqli_stmt_execute($stmt);
 $activeResult = mysqli_stmt_get_result($stmt);
 $hasActiveParking = mysqli_num_rows($activeResult) > 0;
 $activeParking = $hasActiveParking ? mysqli_fetch_assoc($activeResult) : null;
+
+// Pending reservation alert for available_parking.php
+$pendingSql = "SELECT pr.*, ps.spot_number, pz.zone_name, pr.reservation_time
+               FROM parking_records pr
+               JOIN parking_spots ps ON pr.spot_id = ps.spot_id
+               JOIN parking_zones pz ON ps.zone_id = pz.zone_id
+               WHERE pr.user_id = ?
+               AND pr.confirmation_status = 'pending'
+               AND pr.exit_time IS NULL
+               ORDER BY pr.reservation_time DESC
+               LIMIT 1";
+$stmt = mysqli_prepare($conn, $pendingSql);
+mysqli_stmt_bind_param($stmt, "i", $userId);
+mysqli_stmt_execute($stmt);
+$pendingResult = mysqli_stmt_get_result($stmt);
+
+if ($pendingResult && mysqli_num_rows($pendingResult) > 0) {
+    $pending = mysqli_fetch_assoc($pendingResult);
+    
+    // Convert reservation_time to Unix timestamp using DateTime to handle time zones properly
+    $reservationDateTime = new DateTime($pending['reservation_time'], new DateTimeZone('Asia/Bangkok'));
+    $reservedAt = $reservationDateTime->getTimestamp();
+    $now = time();
+    
+    // Calculate time difference and limit to 60 seconds
+    $timeElapsed = $now - $reservedAt;
+    $secondsLeft = max(0, 60 - $timeElapsed);
+    
+    // If more than 1 minute has passed, expire the reservation
+    if ($timeElapsed > 60) {
+        $expireSql = "UPDATE parking_records 
+                      SET confirmation_status = 'expired' 
+                      WHERE record_id = ? AND confirmation_status = 'pending'";
+        $stmt = mysqli_prepare($conn, $expireSql);
+        mysqli_stmt_bind_param($stmt, "i", $pending['record_id']);
+        mysqli_stmt_execute($stmt);
+        
+        // Free up the parking spot
+        $updateSpotSql = "UPDATE parking_spots 
+                         SET status = 'free' 
+                         WHERE spot_id = ?";
+        $stmt = mysqli_prepare($conn, $updateSpotSql);
+        mysqli_stmt_bind_param($stmt, "i", $pending['spot_id']);
+        mysqli_stmt_execute($stmt);
+        
+        // Redirect to refresh the page
+        header("Location: available_parking.php");
+        exit();
+    }
+}
 
 // Get all parking zones
 $zonesSql = "SELECT * FROM parking_zones ORDER BY zone_name";
@@ -227,6 +284,58 @@ while ($zoneRow = mysqli_fetch_assoc($zonesResult)) {
             <div class="col-md-10 content">
                 <h2 class="mb-4">Available Parking Spots</h2>
                 
+                <!-- Parking Rates Card -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5 class="mb-0"><i class="fas fa-info-circle me-2"></i>Parking Rates</h5>
+                    </div>
+                    <div class="card-body">
+                        <p class="text-muted">Our parking rates increase per hour to encourage shorter stays:</p>
+                        <table class="table table-bordered rate-table">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Zone</th>
+                                    <th>1st Hour</th>
+                                    <th>2nd Hour</th>
+                                    <th>3rd Hour</th>
+                                    <th>Each Additional Hour</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>Zone A (Main Entrance)</td>
+                                    <td>30 ฿</td>
+                                    <td>40 ฿</td>
+                                    <td>50 ฿</td>
+                                    <td>+10 ฿ per hour</td>
+                                </tr>
+                                <tr>
+                                    <td>Zone B (Side Entrance)</td>
+                                    <td>25 ฿</td>
+                                    <td>35 ฿</td>
+                                    <td>45 ฿</td>
+                                    <td>+10 ฿ per hour</td>
+                                </tr>
+                                <tr>
+                                    <td>Zone C (Back Entrance)</td>
+                                    <td>20 ฿</td>
+                                    <td>30 ฿</td>
+                                    <td>40 ฿</td>
+                                    <td>+10 ฿ per hour</td>
+                                </tr>
+                                <tr>
+                                    <td>Zone D (VIP)</td>
+                                    <td>50 ฿</td>
+                                    <td>60 ฿</td>
+                                    <td>70 ฿</td>
+                                    <td>+10 ฿ per hour</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <small class="text-muted">*Parking time is rounded up to the nearest hour.</small>
+                    </div>
+                </div>
+
                 <!-- Legend -->
                 <div class="legend">
                     <div class="legend-item">
@@ -270,6 +379,34 @@ while ($zoneRow = mysqli_fetch_assoc($zonesResult)) {
                     </a>
                 </div>
                 <?php endif; ?>
+
+                <?php if ($pendingResult && mysqli_num_rows($pendingResult) > 0): ?>
+                <div class="alert alert-warning alert-dismissible fade show" role="alert">
+                    <strong>Reservation Pending!</strong>
+                    <br>
+                    Your reservation for <b><?php echo htmlspecialchars($pending['zone_name'] . ' - ' . $pending['spot_number']); ?></b> is pending admin confirmation.
+                    <br>
+                    <span class="text-danger">Please go to the parking spot within <span id="pending-countdown"><?php echo $secondsLeft; ?></span> seconds and wait for admin confirmation.</span>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+                <script>
+                // Countdown timer for pending reservation
+                let pendingSeconds = <?php echo $secondsLeft; ?>;
+                const pendingCountdown = document.getElementById('pending-countdown');
+                if (pendingCountdown) {
+                    const timer = setInterval(() => {
+                        pendingSeconds--;
+                        if (pendingSeconds <= 0) {
+                            clearInterval(timer);
+                            pendingCountdown.textContent = "0";
+                            location.reload();
+                        } else {
+                            pendingCountdown.textContent = pendingSeconds;
+                        }
+                    }, 1000);
+                }
+                </script>
+                <?php endif; ?>
                 
                 <?php foreach ($zones as $zone): ?>
                 <div class="zone-container">
@@ -280,7 +417,21 @@ while ($zoneRow = mysqli_fetch_assoc($zonesResult)) {
                     <div class="zone-spots">
                         <?php
                         // Get parking spots for this zone
-                        $spotsSql = "SELECT * FROM parking_spots WHERE zone_id = ? ORDER BY spot_number";
+                        $spotsSql = "SELECT ps.*,
+                                     CASE 
+                                         WHEN ps.status = 'occupied' AND 
+                                              EXISTS (
+                                                  SELECT 1 FROM parking_records pr 
+                                                  WHERE pr.spot_id = ps.spot_id 
+                                                  AND pr.exit_time IS NULL
+                                                  AND pr.confirmation_status IN ('expired', 'cancelled')
+                                              ) 
+                                         THEN 'free'
+                                         ELSE ps.status 
+                                     END as current_status
+                                     FROM parking_spots ps
+                                     WHERE ps.zone_id = ?
+                                     ORDER BY ps.spot_number";
                         $stmt = mysqli_prepare($conn, $spotsSql);
                         mysqli_stmt_bind_param($stmt, "i", $zone['zone_id']);
                         mysqli_stmt_execute($stmt);
@@ -355,6 +506,19 @@ while ($zoneRow = mysqli_fetch_assoc($zonesResult)) {
                 selectedZoneSpan.textContent = zoneName;
             });
         }
+
+        function checkExpiredReservations() {
+            fetch('check_expired_status.php')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.hasExpired) {
+                        location.reload();
+                    }
+                });
+        }
+
+        // Check every 10 seconds
+        setInterval(checkExpiredReservations, 10000);
     </script>
 </body>
 </html>

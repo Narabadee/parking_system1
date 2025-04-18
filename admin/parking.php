@@ -73,7 +73,8 @@ $activeRecordsSql = "SELECT pr.*, ps.spot_number, pz.zone_name, u.first_name, u.
                     JOIN parking_spots ps ON pr.spot_id = ps.spot_id
                     JOIN parking_zones pz ON ps.zone_id = pz.zone_id
                     JOIN user u ON pr.user_id = u.user_id
-                    WHERE pr.exit_time IS NULL
+                    WHERE pr.exit_time IS NULL 
+                    AND pr.confirmation_status = 'confirmed'
                     ORDER BY pr.entry_time DESC";
 $activeRecordsResult = mysqli_query($conn, $activeRecordsSql);
 
@@ -83,14 +84,36 @@ $recentRecordsSql = "SELECT pr.*, ps.spot_number, pz.zone_name, u.first_name, u.
                     JOIN parking_spots ps ON pr.spot_id = ps.spot_id
                     JOIN parking_zones pz ON ps.zone_id = pz.zone_id
                     JOIN user u ON pr.user_id = u.user_id
-                    WHERE pr.exit_time IS NOT NULL
-                    ORDER BY pr.exit_time DESC
+                    WHERE pr.exit_time IS NOT NULL 
+                    OR pr.confirmation_status = 'expired'
+                    ORDER BY pr.exit_time DESC, pr.reservation_time DESC
                     LIMIT 10";
 $recentRecordsResult = mysqli_query($conn, $recentRecordsSql);
 
+// Get pending reservations
+$pendingReservationsSql = "SELECT pr.*, ps.spot_number, pz.zone_name, u.first_name, u.last_name,
+                          TIMESTAMPDIFF(SECOND, NOW(), 
+                            DATE_ADD(pr.reservation_time, INTERVAL 1 MINUTE)) as seconds_remaining
+                          FROM parking_records pr
+                          JOIN parking_spots ps ON pr.spot_id = ps.spot_id
+                          JOIN parking_zones pz ON ps.zone_id = pz.zone_id
+                          JOIN user u ON pr.user_id = u.user_id
+                          WHERE pr.confirmation_status = 'pending'
+                          AND pr.reservation_time >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)
+                          ORDER BY pr.reservation_time ASC";
+
 // Function to get parking spots by zone
 function getParkingSpotsByZone($conn, $zoneId) {
-    $spotsSql = "SELECT * FROM parking_spots WHERE zone_id = ? ORDER BY spot_number";
+    $spotsSql = "SELECT ps.*, 
+                 CASE 
+                    WHEN ps.status = 'occupied' AND pr.confirmation_status = 'expired' THEN 'free'
+                    ELSE ps.status 
+                 END as current_status
+                 FROM parking_spots ps
+                 LEFT JOIN parking_records pr ON ps.spot_id = pr.spot_id 
+                    AND pr.exit_time IS NULL
+                 WHERE ps.zone_id = ?
+                 ORDER BY ps.spot_number";
     $stmt = mysqli_prepare($conn, $spotsSql);
     mysqli_stmt_bind_param($stmt, "i", $zoneId);
     mysqli_stmt_execute($stmt);
@@ -291,15 +314,15 @@ function getParkingSpotsByZone($conn, $zoneId) {
                                         $spots = getParkingSpotsByZone($conn, $zone['zone_id']);
                                         foreach ($spots as $spot): 
                                         ?>
-                                        <div class="parking-spot <?php echo $spot['status']; ?>" data-spot-id="<?php echo $spot['spot_id']; ?>">
+                                        <div class="parking-spot <?php echo $spot['current_status'] == 'free' ? 'free' : 'occupied'; ?>" data-spot-id="<?php echo $spot['spot_id']; ?>">
                                             <div class="spot-number"><?php echo htmlspecialchars($spot['spot_number']); ?></div>
                                             <div class="update-form">
                                                 <form method="post" action="">
                                                     <input type="hidden" name="spot_id" value="<?php echo $spot['spot_id']; ?>">
                                                     <div class="mb-2">
                                                         <select name="status" class="form-select form-select-sm">
-                                                            <option value="free" <?php echo $spot['status'] === 'free' ? 'selected' : ''; ?>>Free</option>
-                                                            <option value="occupied" <?php echo $spot['status'] === 'occupied' ? 'selected' : ''; ?>>Occupied</option>
+                                                            <option value="free" <?php echo $spot['current_status'] === 'free' ? 'selected' : ''; ?>>Free</option>
+                                                            <option value="occupied" <?php echo $spot['current_status'] === 'occupied' ? 'selected' : ''; ?>>Occupied</option>
                                                         </select>
                                                     </div>
                                                     <button type="submit" name="update_spot" class="btn btn-primary btn-sm w-100">Update</button>
@@ -311,6 +334,57 @@ function getParkingSpotsByZone($conn, $zoneId) {
                                 </div>
                             </div>
                             <?php endforeach; ?>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Pending Reservations -->
+                <div class="card shadow mb-4">
+                    <div class="card-header py-3">
+                        <h6 class="m-0 font-weight-bold text-primary">Pending Reservations</h6>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-bordered">
+                                <thead>
+                                    <tr>
+                                        <th>User</th>
+                                        <th>Spot</th>
+                                        <th>Vehicle</th>
+                                        <th>Reserved At</th>
+                                        <th>Time Remaining</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php
+                                    $result = mysqli_query($conn, $pendingReservationsSql);
+                                    while ($reservation = mysqli_fetch_assoc($result)):
+                                    ?>
+                                    <tr id="reservation-<?php echo $reservation['record_id']; ?>">
+                                        <td><?php echo htmlspecialchars($reservation['first_name'] . ' ' . $reservation['last_name']); ?></td>
+                                        <td><?php echo htmlspecialchars($reservation['zone_name'] . ' - ' . $reservation['spot_number']); ?></td>
+                                        <td><?php echo htmlspecialchars($reservation['vehicle_number']); ?></td>
+                                        <td><?php echo date('Y-m-d H:i:s', strtotime($reservation['reservation_time'])); ?></td>
+                                        <td>
+                                            <div class="countdown" data-seconds="<?php echo $reservation['seconds_remaining']; ?>">
+                                                <?php echo gmdate('i:s', max(0, $reservation['seconds_remaining'])); ?>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <button class="btn btn-success btn-sm confirm-btn" 
+                                                    onclick="confirmReservation(<?php echo $reservation['record_id']; ?>)">
+                                                Confirm
+                                            </button>
+                                            <button class="btn btn-danger btn-sm" 
+                                                    onclick="cancelReservation(<?php echo $reservation['record_id']; ?>)">
+                                                Cancel
+                                            </button>
+                                        </td>
+                                    </tr>
+                                    <?php endwhile; ?>
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
@@ -465,7 +539,17 @@ function getParkingSpotsByZone($conn, $zoneId) {
                                                 ?>
                                             </td>
                                             <td>฿<?php echo htmlspecialchars($record['fee']); ?></td>
-                                            <td><?php echo htmlspecialchars($record['payment_status']); ?></td>
+                                            <td>
+                                                <?php
+                                                if ($record['confirmation_status'] == 'expired') {
+                                                    echo '<span class="badge bg-secondary">Expired</span>';
+                                                } elseif ($record['payment_status'] == 'paid') {
+                                                    echo '<span class="badge bg-success">Paid</span>';
+                                                } else {
+                                                    echo '<span class="badge bg-warning">Pending Payment</span>';
+                                                }
+                                                ?>
+                                            </td>
                                         </tr>
                                         <?php endwhile; ?>
                                     <?php else: ?>
@@ -586,7 +670,105 @@ function getParkingSpotsByZone($conn, $zoneId) {
                     spotSelect.disabled = true;
                 }
             });
+
+            // Countdown timer for pending reservations
+            const countdowns = document.querySelectorAll('.countdown');
+            
+            countdowns.forEach(countdown => {
+                let seconds = parseInt(countdown.dataset.seconds);
+                
+                const timer = setInterval(() => {
+                    seconds--;
+                    
+                    if (seconds <= 0) {
+                        clearInterval(timer);
+                        const row = countdown.closest('tr');
+                        row.remove();
+                        // Optionally show a message that the reservation expired
+                    } else {
+                        countdown.textContent = new Date(seconds * 1000).toISOString().substr(14, 5);
+                    }
+                }, 1000);
+            });
         });
+
+        // Check for expired reservations more frequently (every 10 seconds instead of every minute)
+        setInterval(checkExpiredReservations, 10000);
+
+        // Functions for confirming/canceling reservations
+        function confirmReservation(recordId) {
+            fetch('confirm_reservation.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `record_id=${recordId}&action=confirm`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    document.getElementById(`reservation-${recordId}`).remove();
+                }
+            });
+        }
+
+        function cancelReservation(recordId) {
+            if (confirm('Are you sure you want to cancel this reservation?')) {
+                fetch('confirm_reservation.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `record_id=${recordId}&action=cancel`
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById(`reservation-${recordId}`).remove();
+                    }
+                });
+            }
+        }
+
+        // Add this to the existing JavaScript in parking.php
+        function refreshSpots() {
+            // Check expired reservations
+            fetch('check_expired_reservations.php')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Reload the page to update spot status
+                        location.reload();
+                    }
+                })
+                .catch(error => console.error('Error:', error));
+        }
+
+        // Check every 10 seconds
+        setInterval(refreshSpots, 10000);
+
+        // Add this to your existing JavaScript
+        function updateSpotStatus(spotId) {
+            const spotElement = document.querySelector(`[data-spot-id="${spotId}"]`);
+            if (spotElement) {
+                spotElement.classList.remove('occupied');
+                spotElement.classList.add('free');
+            }
+        }
+
+        // Modify the existing checkExpiredReservations function
+        function checkExpiredReservations() {
+            fetch('check_expired_reservations.php')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Update spot status without page reload
+                        location.reload(); // For now, reload the page
+                        // TODO: Implement real-time spot status updates
+                    }
+                })
+                .catch(error => console.error('Error:', error));
+        }
     </script>
 </body>
 </html>

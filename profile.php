@@ -35,6 +35,36 @@ mysqli_stmt_execute($stmt);
 $result = mysqli_stmt_get_result($stmt);
 $subscription = mysqli_fetch_assoc($result);
 
+// Auto-renew subscription if expired and not cancelled
+if ($subscription && strtotime($subscription['end_date']) < time() && $subscription['status'] == 'active') {
+    // Expire the old subscription
+    $updateSql = "UPDATE user_subscriptions SET status = 'expired' WHERE subscription_id = ?";
+    $stmt = mysqli_prepare($conn, $updateSql);
+    mysqli_stmt_bind_param($stmt, "i", $subscription['subscription_id']);
+    mysqli_stmt_execute($stmt);
+
+    // Create new subscription with same plan
+    $planId = $subscription['plan_id'];
+    $planSql = "SELECT * FROM subscription_plans WHERE plan_id = ?";
+    $stmt = mysqli_prepare($conn, $planSql);
+    mysqli_stmt_bind_param($stmt, "i", $planId);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $plan = mysqli_fetch_assoc($result);
+
+    if ($plan) {
+        $newStartDate = date('Y-m-d');
+        $newEndDate = date('Y-m-d', strtotime("+{$plan['duration_months']} months"));
+        $insertSql = "INSERT INTO user_subscriptions (user_id, plan_id, start_date, end_date, status) VALUES (?, ?, ?, ?, 'active')";
+        $stmt = mysqli_prepare($conn, $insertSql);
+        mysqli_stmt_bind_param($stmt, "iiss", $userId, $planId, $newStartDate, $newEndDate);
+        mysqli_stmt_execute($stmt);
+        // Optionally, add payment record here
+        header("Location: profile.php");
+        exit();
+    }
+}
+
 // Get parking frequency data (last 6 months)
 $monthlyData = [];
 $freqSql = "SELECT DATE_FORMAT(entry_time, '%Y-%m') as month, COUNT(*) as count 
@@ -301,6 +331,9 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['subscribe'])) {
                                     <a href="#" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#editProfileModal">
                                         <i class="fas fa-edit"></i> Edit Profile
                                     </a>
+                                    <a href="#" class="btn btn-warning btn-sm" data-bs-toggle="modal" data-bs-target="#changePasswordModal">
+                                        <i class="fas fa-key"></i> Change Password
+                                    </a>
                                 </div>
                             </div>
                         </div>
@@ -332,30 +365,41 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['subscribe'])) {
                                 </div>
                                 <div class="mb-2">
                                     <strong>Status:</strong> 
-                                    <span class="badge bg-success">Active</span>
+                                    <?php if ($subscription['status'] == 'cancelled' && strtotime($subscription['end_date']) > time()): ?>
+                                        <span class="badge bg-secondary">Cancelled (usable until <?php echo date('F j, Y', strtotime($subscription['end_date'])); ?>)</span>
+                                    <?php elseif ($subscription['status'] == 'active'): ?>
+                                        <span class="badge bg-success">Active</span>
+                                    <?php else: ?>
+                                        <span class="badge bg-danger">Expired</span>
+                                    <?php endif; ?>
                                 </div>
+                                <?php
+                                $startDate = strtotime($subscription['start_date']);
+                                $endDate = strtotime($subscription['end_date']);
+                                $currentDate = time();
+                                $totalDays = ceil(($endDate - $startDate) / 86400);
+                                $daysUsed = max(0, ceil(($currentDate - $startDate) / 86400));
+                                $daysRemaining = max(0, $totalDays - $daysUsed);
+                                ?>
                                 <div class="mb-3">
                                     <strong>Subscription Progress:</strong>
-                                    <div class="progress mt-2">
-                                        <?php
-                                        $startDate = strtotime($subscription['start_date']);
-                                        $endDate = strtotime($subscription['end_date']);
-                                        $currentDate = time();
-                                        $totalDuration = $endDate - $startDate;
-                                        $elapsedDuration = $currentDate - $startDate;
-                                        $percentComplete = min(100, max(0, ($elapsedDuration / $totalDuration) * 100));
-                                        ?>
-                                        <div class="progress-bar bg-success" role="progressbar" style="width: <?php echo $percentComplete; ?>%;" 
-                                            aria-valuenow="<?php echo $percentComplete; ?>" aria-valuemin="0" aria-valuemax="100">
-                                            <?php echo round($percentComplete); ?>%
-                                        </div>
+                                    <div class="mt-2">
+                                        <span class="badge bg-info text-dark"><?php echo $daysUsed; ?> days used</span>
+                                        <span class="badge bg-success"><?php echo $daysRemaining; ?> days remaining</span>
                                     </div>
-                                    <small class="text-muted">You have used <?php echo round($percentComplete); ?>% of your subscription.</small>
+                                    <small class="text-muted">
+                                        Your subscription is valid until <?php echo date('F j, Y', $endDate); ?>.
+                                    </small>
                                 </div>
                                 <div class="text-center mt-4">
                                     <a href="#" class="btn btn-success btn-sm" data-bs-toggle="modal" data-bs-target="#subscriptionModal">
                                         <i class="fas fa-sync-alt"></i> Renew Subscription
                                     </a>
+                                </div>
+                                <div class="text-center mt-2">
+                                    <button type="button" class="btn btn-danger btn-sm" data-bs-toggle="modal" data-bs-target="#cancelSubscriptionModal">
+                                        <i class="fas fa-times"></i> Cancel Subscription
+                                    </button>
                                 </div>
                                 <?php else: ?>
                                 <div class="text-center mb-4">
@@ -545,6 +589,65 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['subscribe'])) {
                         </div>
                         <?php } ?>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Change Password Modal -->
+    <div class="modal fade" id="changePasswordModal" tabindex="-1" aria-labelledby="changePasswordModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="changePasswordModalLabel">Change Password</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form action="update_password.php" method="post">
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label for="currentPassword" class="form-label">Current Password</label>
+                            <input type="password" class="form-control" id="currentPassword" name="current_password" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="newPassword" class="form-label">New Password</label>
+                            <input type="password" class="form-control" id="newPassword" name="new_password" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="confirmPassword" class="form-label">Confirm New Password</label>
+                            <input type="password" class="form-control" id="confirmPassword" name="confirm_password" required>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Change Password</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cancel Subscription Modal -->
+    <div class="modal fade" id="cancelSubscriptionModal" tabindex="-1" aria-labelledby="cancelSubscriptionModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="cancelSubscriptionModalLabel">Cancel Subscription</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p>Are you sure you want to cancel your subscription? This action cannot be undone.</p>
+                    <ul class="text-danger">
+                        <li>Your subscription benefits will end immediately</li>
+                        <li>No refunds will be provided for the remaining period</li>
+                        <li>You will be charged regular parking rates</li>
+                    </ul>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Keep Subscription</button>
+                    <form action="cancel_subscription.php" method="post">
+                        <input type="hidden" name="subscription_id" value="<?php echo $subscription['subscription_id']; ?>">
+                        <button type="submit" name="cancel_subscription" class="btn btn-danger">Cancel Subscription</button>
+                    </form>
                 </div>
             </div>
         </div>
