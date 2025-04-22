@@ -59,6 +59,30 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["update_record"])) {
     }
 }
 
+// Handle payment confirmation
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["confirm_payment"])) {
+    $recordId = $_POST["record_id"];
+    mysqli_begin_transaction($conn);
+    try {
+        // Set payment_status to 'paid', set exit_time, and free the spot
+        $updateSql = "UPDATE parking_records pr
+                      JOIN parking_spots ps ON pr.spot_id = ps.spot_id
+                      SET pr.payment_status = 'paid',
+                          pr.exit_time = NOW(),
+                          ps.status = 'free'
+                      WHERE pr.record_id = ?";
+        $stmt = mysqli_prepare($conn, $updateSql);
+        mysqli_stmt_bind_param($stmt, "i", $recordId);
+        mysqli_stmt_execute($stmt);
+
+        mysqli_commit($conn);
+        $successMsg = "Payment confirmed and parking session closed.";
+    } catch (Exception $e) {
+        mysqli_rollback($conn);
+        $errorMsg = "Error confirming payment: " . $e->getMessage();
+    }
+}
+
 // Get all parking zones
 $zonesSql = "SELECT * FROM parking_zones ORDER BY zone_name";
 $zonesResult = mysqli_query($conn, $zonesSql);
@@ -101,6 +125,16 @@ $pendingReservationsSql = "SELECT pr.*, ps.spot_number, pz.zone_name, u.first_na
                           WHERE pr.confirmation_status = 'pending'
                           AND pr.reservation_time >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)
                           ORDER BY pr.reservation_time ASC";
+
+// Get all pending payments
+$pendingPaymentsSql = "SELECT pr.*, u.first_name, u.last_name, ps.spot_number, pz.zone_name
+                       FROM parking_records pr
+                       JOIN user u ON pr.user_id = u.user_id
+                       JOIN parking_spots ps ON pr.spot_id = ps.spot_id
+                       JOIN parking_zones pz ON ps.zone_id = pz.zone_id
+                       WHERE pr.payment_status = 'pending'
+                       ORDER BY pr.entry_time ASC";
+$pendingPaymentsResult = mysqli_query($conn, $pendingPaymentsSql);
 
 // Function to get parking spots by zone
 function getParkingSpotsByZone($conn, $zoneId) {
@@ -386,6 +420,54 @@ function getParkingSpotsByZone($conn, $zoneId) {
                                 </tbody>
                             </table>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Pending Payments Section -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5>Pending Payments</h5>
+                    </div>
+                    <div class="card-body">
+                        <?php if (isset($successMsg)): ?>
+                            <div class="alert alert-success"><?php echo $successMsg; ?></div>
+                        <?php endif; ?>
+                        <?php if (isset($errorMsg)): ?>
+                            <div class="alert alert-danger"><?php echo $errorMsg; ?></div>
+                        <?php endif; ?>
+                        <table class="table table-bordered">
+                            <thead>
+                                <tr>
+                                    <th>User</th>
+                                    <th>Vehicle</th>
+                                    <th>Spot</th>
+                                    <th>Zone</th>
+                                    <th>Entry Time</th>
+                                    <th>Fee</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php while ($row = mysqli_fetch_assoc($pendingPaymentsResult)): ?>
+                                <tr>
+                                    <td><?php echo htmlspecialchars($row['first_name'] . ' ' . $row['last_name']); ?></td>
+                                    <td><?php echo htmlspecialchars($row['vehicle_number']); ?></td>
+                                    <td><?php echo htmlspecialchars($row['spot_number']); ?></td>
+                                    <td><?php echo htmlspecialchars($row['zone_name']); ?></td>
+                                    <td><?php echo htmlspecialchars($row['entry_time']); ?></td>
+                                    <td>฿<?php echo number_format($row['fee'], 2); ?></td>
+                                    <td>
+                                        <form method="post" style="display:inline;">
+                                            <input type="hidden" name="record_id" value="<?php echo $row['record_id']; ?>">
+                                            <button type="submit" name="confirm_payment" class="btn btn-success btn-sm">
+                                                Confirm Payment
+                                            </button>
+                                        </form>
+                                    </td>
+                                </tr>
+                                <?php endwhile; ?>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
 

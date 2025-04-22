@@ -26,32 +26,16 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["make_payment"])) {
     mysqli_begin_transaction($conn);
     
     try {
-        // Update parking record
+        // Set payment_status to 'pending' and do NOT set exit_time yet
         $updateRecordSql = "UPDATE parking_records SET 
-                           exit_time = NOW(), 
                            fee = ?, 
-                           payment_status = 'paid' 
+                           payment_status = 'pending' 
                            WHERE record_id = ? AND user_id = ?";
         $stmt = mysqli_prepare($conn, $updateRecordSql);
         mysqli_stmt_bind_param($stmt, "dii", $amount, $recordId, $userId);
         mysqli_stmt_execute($stmt);
         
-        // Get spot ID to free up
-        $getSpotSql = "SELECT spot_id FROM parking_records WHERE record_id = ?";
-        $stmt = mysqli_prepare($conn, $getSpotSql);
-        mysqli_stmt_bind_param($stmt, "i", $recordId);
-        mysqli_stmt_execute($stmt);
-        $result = mysqli_stmt_get_result($stmt);
-        $row = mysqli_fetch_assoc($result);
-        $spotId = $row['spot_id'];
-        
-        // Update spot status to free
-        $updateSpotSql = "UPDATE parking_spots SET status = 'free' WHERE spot_id = ?";
-        $stmt = mysqli_prepare($conn, $updateSpotSql);
-        mysqli_stmt_bind_param($stmt, "i", $spotId);
-        mysqli_stmt_execute($stmt);
-        
-        // Create payment record
+        // Create payment record with status pending (optional: add a status column to payments if needed)
         $referenceNumber = 'PAY-' . time() . '-' . $userId;
         $createPaymentSql = "INSERT INTO payments (record_id, amount, payment_date, payment_method, reference_number) 
                             VALUES (?, ?, NOW(), ?, ?)";
@@ -63,8 +47,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["make_payment"])) {
         mysqli_commit($conn);
         
         // Set success message
-        $_SESSION['success_message'] = "Payment successful! Your parking fee has been paid.";
-        header("Location: dashboard.php");
+        $_SESSION['success_message'] = "Payment submitted! Please wait for admin confirmation before leaving.";
+        header("Location: service_fee.php");
         exit();
     } catch (Exception $e) {
         // Rollback transaction on error
